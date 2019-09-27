@@ -2,15 +2,40 @@ import mock_db
 import uuid
 from worker import worker_main
 from threading import Thread
+import time
+import logging
 
-def lock_is_free():
+logger = logging.getLogger(__name__)
+
+def release_lock(db):
+    db.delete_one({'is_worker_running': True})
+
+# fixed for one process run
+lock_id = uuid.uuid4()
+def acquire_lock(db):
+    """
+    Insertion into the db is not an atomic operation.
+    To ensure that the lock gets acquired only once
+    the key is set to a fixed value and the thread that writes first
+    will get the lock and other writes will fail.
+    """
+    obj = {'_id': lock_id, 'is_worker_running': True}
+    db.insert_one(obj)
+
+def lock_is_free(db):
     """
         CHANGE ME, POSSIBLY MY ARGS
 
         Return whether the lock is free
     """
+    # check if lock is free
 
-    return True
+    # acquire the lock
+    try:
+        acquire_lock(db)
+        return True
+    except:
+        return False
 
 
 def attempt_run_worker(worker_hash, give_up_after, db, retry_interval):
@@ -27,8 +52,29 @@ def attempt_run_worker(worker_hash, give_up_after, db, retry_interval):
                             until the lock is free, unless we have been trying for more
                             than give_up_after seconds
     """
-    if lock_is_free():
-        worker_main(worker_hash, db)
+
+    start = time.time()
+    while True:
+        # Check if lock is free
+        # If it's free, acquire it before moving forward
+        if lock_is_free(db):
+            try:
+                worker_main(worker_hash, db)
+                release_lock(db)
+                break
+            except:
+                # release lock on crash
+                release_lock(db)
+                logger.warning("Worker id: {} crashed.".format(worker_hash))
+        else:
+            time.sleep(retry_interval)
+            # check time elapsed from start
+            # every time it wakes up
+            stop = time.time()
+            # give up if time elapsed greater than give_up_after
+            if (stop - start) >= give_up_after:
+                break
+
 
 
 if __name__ == "__main__":
